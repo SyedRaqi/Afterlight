@@ -2,7 +2,7 @@
 
 Explore. Imagine. Create Tomorrow.
 
-AFTERLIGHT is a future-exploration platform designed to keep verified facts, active research, predictions, plausible scenarios, and creative speculation visibly distinct. The application does not ship fabricated research or example articles; published content is read from Supabase and must pass the editorial workflow.
+AFTERLIGHT is a futuristic digital magazine and creative inspiration platform for future exploration, designed to keep verified facts, active research, predictions, plausible scenarios, and creative speculation visibly distinct. The application does not ship fabricated research or example articles; published content is read from Supabase and must pass the editorial workflow.
 
 ## Local development
 
