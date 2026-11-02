@@ -30,7 +30,7 @@ export interface Article {
 
 export interface Notification {
   id: string
-  kind: 'submission_approved' | 'submission_published' | 'submission_returned' | 'editorial_update' | 'comment_report_resolved' | 'comment_moderated'
+  kind: 'submission_approved' | 'submission_published' | 'submission_returned' | 'submission_rejected' | 'editorial_update' | 'comment_report_resolved' | 'comment_moderated'
   title: string
   message: string
   read_at: string | null

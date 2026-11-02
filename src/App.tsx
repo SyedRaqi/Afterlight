@@ -8,12 +8,127 @@ import {
   MessageSquare, Orbit, Plus, Search, Send, ShieldCheck, Sparkles, Tags, Telescope, UserRound, Users, X,
 } from 'lucide-react'
 import { AuthProvider, useAuth } from './lib/auth'
-import { removeArticleImage, uploadArticleImage } from './lib/storage'
+import { getArticleImageUrl, removeArticleImage, uploadArticleImage, type ResolvedArticleImageUrl } from './lib/storage'
+import { getOwnedProfilePhotoPath, removeProfilePhoto, uploadProfilePhoto, validateProfilePhoto } from './lib/profilePhotos'
+import { normalizeReferenceUrls } from './lib/referenceUrls'
 import { backendConfigured, supabase } from './lib/supabase'
 import type { Article, Category, Classification, Notification, Role } from './lib/types'
 
 const classifications: Classification[] = ['FACT', 'RESEARCH', 'PREDICTION', 'POSSIBILITY', 'IMAGINATION']
 const categoryFallback = ['Technology', 'Environment', 'Space', 'Education', 'Society', 'Health', 'Economy']
+
+type ArticleImageState = Omit<ResolvedArticleImageUrl, 'url'> & {
+  value: string | null
+  url: string | null
+  status: 'loading' | 'ready' | 'unavailable'
+}
+
+function useArticleImageUrl(value: string | null) {
+  const [image, setImage] = useState<ArticleImageState>({ value, url: null, expiresAt: null, status: value ? 'loading' : 'unavailable' })
+  const imageRef = useRef(image)
+  const refreshRef = useRef<(expectedUrl?: string, afterError?: boolean) => void>(() => {})
+  const stopRefreshRef = useRef<() => void>(() => {})
+  const errorRefreshCount = useRef(0)
+
+  useEffect(() => {
+    let active = true
+    let timer: number | undefined
+    let refreshFailures = 0
+    errorRefreshCount.current = 0
+
+    const updateImage = (next: ArticleImageState) => {
+      imageRef.current = next
+      setImage(next)
+    }
+
+    const schedule = (delayMs: number, expectedUrl?: string, afterError = false) => {
+      if (timer !== undefined) window.clearTimeout(timer)
+      timer = window.setTimeout(() => { void refresh(expectedUrl, afterError) }, Math.max(1000, delayMs))
+    }
+
+    const refresh = async (expectedUrl?: string, afterError = false) => {
+      if (!value) return
+      try {
+        const resolved = await getArticleImageUrl(value, expectedUrl)
+        if (!active) return
+        if (!resolved) {
+          updateImage({ value, url: null, expiresAt: null, status: 'unavailable' })
+          return
+        }
+        if (resolved.retryAfterAt === undefined) refreshFailures = 0
+        updateImage({ value, ...resolved, status: 'ready' })
+        if (resolved.retryAfterAt !== undefined) {
+          schedule(resolved.retryAfterAt - Date.now(), resolved.url)
+        } else if (resolved.expiresAt !== null) {
+          schedule(resolved.expiresAt - Date.now() - 5 * 60 * 1000, resolved.url)
+        }
+      } catch {
+        if (!active) return
+        refreshFailures += 1
+        const current = imageRef.current
+        if (afterError || !current.url) {
+          updateImage({ value, url: null, expiresAt: current.expiresAt, status: 'unavailable' })
+        }
+        if (refreshFailures >= 5) {
+          stopRefreshRef.current()
+          return
+        }
+        const backoffMs = Math.min(30_000 * 2 ** (refreshFailures - 1), 2 * 60 * 1000)
+        schedule(backoffMs, expectedUrl ?? current.url ?? undefined)
+      }
+    }
+
+    stopRefreshRef.current = () => {
+      if (timer !== undefined) window.clearTimeout(timer)
+      timer = undefined
+    }
+    refreshRef.current = (expectedUrl, afterError) => { void refresh(expectedUrl, afterError) }
+    updateImage({ value, url: null, expiresAt: null, status: value ? 'loading' : 'unavailable' })
+    void refresh()
+
+    return () => {
+      active = false
+      if (timer !== undefined) window.clearTimeout(timer)
+      refreshRef.current = () => {}
+      stopRefreshRef.current = () => {}
+    }
+  }, [value])
+
+  const handleImageLoad = (loadedUrl: string) => {
+    if (imageRef.current.value === value && imageRef.current.url === loadedUrl) errorRefreshCount.current = 0
+  }
+
+  const handleImageError = (failedUrl: string) => {
+    const current = imageRef.current
+    if (current.value !== value || current.url !== failedUrl) return
+    if (current.expiresAt === null || errorRefreshCount.current >= 1) {
+      stopRefreshRef.current()
+      imageRef.current = { ...current, url: null, status: 'unavailable' }
+      setImage(imageRef.current)
+      return
+    }
+    errorRefreshCount.current += 1
+    refreshRef.current(failedUrl, true)
+  }
+
+  if (image.value !== value) return { value, url: null, expiresAt: null, status: value ? 'loading' as const : 'unavailable' as const, handleImageLoad, handleImageError }
+  return { ...image, handleImageLoad, handleImageError }
+}
+
+function SubmissionReviewImage({ value, title }: { value: string | null; title: string }) {
+  const image = useArticleImageUrl(value)
+  if (!value) return null
+  if (image.status === 'loading') return <div className="review-image-state" role="status">Loading private submission image…</div>
+  if (!image.url) return <div className="review-image-state" role="status">Submission image unavailable.</div>
+  return <img
+    className="review-submission-image"
+    src={image.url}
+    alt={`Image submitted with “${title}”`}
+    onLoad={() => image.handleImageLoad(image.url!)}
+    onError={() => image.handleImageError(image.url!)}
+  />
+}
+
 const classificationDescriptions: Record<Classification, string> = {
   FACT: 'Established information, supported by verifiable evidence.',
   RESEARCH: 'Work in progress. Findings may change as evidence develops.',
@@ -54,6 +169,168 @@ function Mark({ small = false }: { small?: boolean }) {
       <span /><span /><span />
     </span>
   )
+}
+
+function UserAvatar({ url, name, className = 'avatar', fallbackClassName = className }: {
+  url: string | null | undefined
+  name: string
+  className?: string
+  fallbackClassName?: string
+}) {
+  const [imageFailed, setImageFailed] = useState(false)
+  useEffect(() => setImageFailed(false), [url])
+
+  if (url && !imageFailed) {
+    return <img className={`${className} user-avatar-image`} src={url} alt="" onError={() => setImageFailed(true)} />
+  }
+
+  return <span className={`${fallbackClassName} user-avatar-fallback`} role="img" aria-label={`${name}'s AFTERLIGHT profile photo placeholder`}><Orbit size={15} strokeWidth={1.7} /></span>
+}
+
+function ProfilePhotoEditor({ profileId, displayName, photoUrl, refreshProfile }: {
+  profileId: string
+  displayName: string
+  photoUrl: string | null
+  refreshProfile: () => Promise<void>
+}) {
+  const inputRef = useRef<HTMLInputElement>(null)
+  const [selectedFile, setSelectedFile] = useState<File | null>(null)
+  const [previewUrl, setPreviewUrl] = useState<string | null>(null)
+  const [currentPhotoUrl, setCurrentPhotoUrl] = useState(photoUrl)
+  const [busy, setBusy] = useState(false)
+  const [message, setMessage] = useState<{ kind: 'success' | 'error'; text: string } | null>(null)
+
+  useEffect(() => setCurrentPhotoUrl(photoUrl), [photoUrl])
+  useEffect(() => {
+    if (!selectedFile) {
+      setPreviewUrl(null)
+      return
+    }
+    const objectUrl = URL.createObjectURL(selectedFile)
+    setPreviewUrl(objectUrl)
+    return () => URL.revokeObjectURL(objectUrl)
+  }, [selectedFile])
+
+  function discardSelection() {
+    setSelectedFile(null)
+    setMessage(null)
+    if (inputRef.current) inputRef.current.value = ''
+  }
+
+  function selectPhoto(file: File | undefined) {
+    if (!file) return
+    const validationError = validateProfilePhoto(file)
+    if (validationError) {
+      setSelectedFile(null)
+      setMessage({ kind: 'error', text: validationError })
+      if (inputRef.current) inputRef.current.value = ''
+      return
+    }
+    setMessage(null)
+    setSelectedFile(file)
+  }
+
+  async function savePhoto() {
+    if (!selectedFile || !supabase) return
+    setBusy(true)
+    setMessage(null)
+    const previousPath = getOwnedProfilePhotoPath(currentPhotoUrl, profileId)
+    let uploadedPath: string | null = null
+    try {
+      const uploaded = await uploadProfilePhoto(selectedFile, profileId)
+      uploadedPath = uploaded.path
+      const { error: updateError } = await supabase
+        .from('profiles')
+        .update({ avatar_url: uploaded.url })
+        .eq('id', profileId)
+        .select('id')
+        .single()
+      if (updateError) throw updateError
+
+      setCurrentPhotoUrl(uploaded.url)
+      setSelectedFile(null)
+      if (inputRef.current) inputRef.current.value = ''
+      try {
+        await refreshProfile()
+      } catch {
+        // The saved public URL remains available in this view; auth refresh can retry later.
+      }
+
+      if (previousPath && previousPath !== uploaded.path) {
+        try {
+          await removeProfilePhoto(previousPath)
+        } catch {
+          setMessage({ kind: 'success', text: 'Photo saved. The previous image could not be removed; you can retry after refreshing.' })
+          setBusy(false)
+          return
+        }
+      }
+      setMessage({ kind: 'success', text: 'Profile photo updated.' })
+    } catch (error) {
+      if (uploadedPath && uploadedPath !== previousPath) {
+        try { await removeProfilePhoto(uploadedPath) } catch { /* Keep the original profile photo intact. */ }
+      }
+      setMessage({ kind: 'error', text: error instanceof Error ? error.message : 'The profile photo could not be saved.' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function deletePhoto() {
+    if (!supabase || !currentPhotoUrl) return
+    setBusy(true)
+    setMessage(null)
+    const path = getOwnedProfilePhotoPath(currentPhotoUrl, profileId)
+    try {
+      const { error: updateError } = await supabase
+        .from('profiles')
+        .update({ avatar_url: null })
+        .eq('id', profileId)
+        .select('id')
+        .single()
+      if (updateError) throw updateError
+
+      setCurrentPhotoUrl(null)
+      await refreshProfile().catch(() => {})
+      if (path) {
+        try {
+          await removeProfilePhoto(path)
+          setMessage({ kind: 'success', text: 'Profile photo removed.' })
+        } catch {
+          setMessage({ kind: 'error', text: 'The photo was removed from your profile, but its Storage file could not be deleted.' })
+        }
+      } else {
+        setMessage({ kind: 'success', text: 'Profile photo removed.' })
+      }
+    } catch (error) {
+      setMessage({ kind: 'error', text: error instanceof Error ? error.message : 'The profile photo could not be removed.' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return <section className="profile-photo-editor" aria-label="Profile photo">
+    <div className="profile-photo-preview">
+      <UserAvatar url={previewUrl ?? currentPhotoUrl} name={displayName} className="avatar profile-photo-avatar" fallbackClassName="avatar profile-photo-avatar" />
+      <div><strong>{selectedFile ? 'Preview your photo' : 'Your profile photo'}</strong><span>JPG, PNG, or WebP · up to 5 MB</span></div>
+    </div>
+    <input
+      ref={inputRef}
+      className="profile-photo-input"
+      type="file"
+      accept="image/jpeg,image/png,image/webp,.jpg,.jpeg,.png,.webp"
+      aria-label="Choose a profile photo"
+      onChange={(event) => selectPhoto(event.currentTarget.files?.[0])}
+    />
+    <div className="profile-photo-actions">
+      {!selectedFile ? <button type="button" className="button-secondary" disabled={busy} onClick={() => inputRef.current?.click()}>{currentPhotoUrl ? 'Change photo' : 'Upload photo'}</button> : <>
+        <button type="button" className="button-primary" disabled={busy} onClick={() => void savePhoto()}>{busy ? <><span className="spinner" /> Uploading…</> : 'Save photo'}<Check size={14} /></button>
+        <button type="button" className="button-text" disabled={busy} onClick={discardSelection}>Cancel</button>
+      </>}
+      {!selectedFile && currentPhotoUrl && <button type="button" className="button-text profile-photo-remove" disabled={busy} onClick={() => void deletePhoto()}>{busy ? 'Removing…' : 'Remove photo'}</button>}
+    </div>
+    {message && <div className={message.kind === 'error' ? 'inline-error' : 'success-message'} role="status">{message.text}</div>}
+  </section>
 }
 
 function AppShell({ children }: { children: ReactNode }) {
@@ -124,7 +401,7 @@ function AppShell({ children }: { children: ReactNode }) {
             <span>{backendConfigured ? 'Connected to the field' : 'Field notes are offline'}</span>
           </div>
           <div className="sidebar-account">
-            <span className="avatar">{profile?.display_name?.slice(0, 1).toUpperCase() ?? 'A'}</span>
+            <UserAvatar url={profile?.avatar_url} name={profile?.display_name ?? 'Afterlight'} />
             <div className="account-copy">
               <strong>{profile?.display_name ?? (session ? 'Member' : 'Explorer')}</strong>
               <span>{profile?.role ?? (session ? 'Member' : 'Guest access')}</span>
@@ -287,10 +564,11 @@ function ClassificationTag({ value }: { value: Classification }) {
 }
 
 function ArticleCard({ article, featured = false }: { article: Article; featured?: boolean }) {
+  const heroImage = useArticleImageUrl(article.hero_image_url)
   return (
     <Link to={`/article/${article.slug}`} className={`article-card${featured ? ' article-card-featured' : ''}`}>
-      {article.hero_image_url ? (
-        <div className="article-image" style={{ backgroundImage: `url("${article.hero_image_url}")` }} />
+      {heroImage.url ? (
+        <div className="article-image"><img className="article-image-file" src={heroImage.url} alt="" onLoad={() => heroImage.handleImageLoad(heroImage.url!)} onError={() => heroImage.handleImageError(heroImage.url!)} /></div>
       ) : (
         <div className="article-image article-image-abstract">
           <span className="image-orbit image-orbit-one" /><span className="image-orbit image-orbit-two" /><span className="image-core" />
@@ -583,7 +861,7 @@ interface CommunityComment {
   id: string
   body: string
   created_at: string
-  author: { display_name: string } | null
+  author: { display_name: string; avatar_url: string | null } | null
   article: { title: string; slug: string } | null
 }
 
@@ -683,7 +961,7 @@ function CommunityPage() {
       const [highlightsResult, commentsResult, statsResult] = await Promise.all([
         supabase.rpc('get_community_highlights'),
         supabase.from('comments')
-          .select('id,body,created_at,author:profiles!comments_author_id_fkey(display_name),article:articles!comments_article_id_fkey!inner(title,slug)')
+          .select('id,body,created_at,author:profiles!comments_author_id_fkey(display_name,avatar_url),article:articles!comments_article_id_fkey!inner(title,slug)')
           .eq('status', 'visible')
           .order('created_at', { ascending: false })
           .limit(6),
@@ -762,13 +1040,13 @@ function CommunityPage() {
         <aside className="community-aside">
           <div className="community-activity-block"><div className="eyebrow"><span className="eyebrow-line" />RECENT DISCUSSIONS</div>
             {loading && <div className="community-side-loading"><span className="spinner" />Loading conversations…</div>}
-            {!loading && comments.length > 0 && <div className="community-discussions">{comments.map((comment) => <article className="community-discussion" key={comment.id}><div className="community-discussion-author"><span className="avatar">{comment.author?.display_name?.slice(0, 1).toUpperCase() ?? 'A'}</span><span>{comment.author?.display_name ?? 'Community member'}<small>{new Date(comment.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</small></span></div><p>{comment.body}</p>{comment.article && <Link to={`/article/${comment.article.slug}#conversation`}>{comment.article.title}<ArrowUpRight size={12} /></Link>}</article>)}</div>}
+            {!loading && comments.length > 0 && <div className="community-discussions">{comments.map((comment) => <article className="community-discussion" key={comment.id}><div className="community-discussion-author"><UserAvatar url={comment.author?.avatar_url} name={comment.author?.display_name ?? 'Community member'} /><span>{comment.author?.display_name ?? 'Community member'}<small>{new Date(comment.created_at).toLocaleDateString(undefined, { month: 'short', day: 'numeric' })}</small></span></div><p>{comment.body}</p>{comment.article && <Link to={`/article/${comment.article.slug}#conversation`}>{comment.article.title}<ArrowUpRight size={12} /></Link>}</article>)}</div>}
             {!loading && !error && comments.length === 0 && <p className="community-no-discussions">{backendConfigured ? 'No public discussions yet. Each thoughtful question can start one.' : 'Recent member discussions will appear once the research desk is connected.'}</p>}
             {!loading && Boolean(error) && <p className="community-no-discussions">Recent discussions are temporarily unavailable.</p>}
           </div>
           <div className="community-activity-block"><div className="eyebrow"><span className="eyebrow-line" />RECENT CONTRIBUTORS</div>
             {articlesLoading && <div className="community-side-loading"><span className="spinner" />Finding contributors…</div>}
-            {!articlesLoading && contributors.length > 0 && <div className="community-contributors">{contributors.map((contributor) => <Link className="community-contributor" key={contributor.id} to={`/contributors/${contributor.id}`}><span className="avatar">{contributor.name.slice(0, 1).toUpperCase()}</span><span><strong>{contributor.name}</strong><small>{contributor.articleCount} recent {contributor.articleCount === 1 ? 'note' : 'notes'} · {contributor.latestArticle.title}</small></span><ArrowUpRight size={13} /></Link>)}</div>}
+            {!articlesLoading && contributors.length > 0 && <div className="community-contributors">{contributors.map((contributor) => <Link className="community-contributor" key={contributor.id} to={`/contributors/${contributor.id}`}><UserAvatar url={contributor.avatarUrl} name={contributor.name} /><span><strong>{contributor.name}</strong><small>{contributor.articleCount} recent {contributor.articleCount === 1 ? 'note' : 'notes'} · {contributor.latestArticle.title}</small></span><ArrowUpRight size={13} /></Link>)}</div>}
             {!articlesLoading && contributors.length === 0 && <p className="community-no-discussions">Published authors will be introduced here.</p>}
           </div>
           <div className="community-principles"><div className="eyebrow"><span className="eyebrow-line" />COMMUNITY PRINCIPLES</div><div className="principle-card"><span>01</span><div><strong>Stay curious</strong><p>Ask generously. Challenge ideas, not people.</p></div></div><div className="principle-card"><span>02</span><div><strong>Show your sources</strong><p>Make it easy for others to follow the evidence.</p></div></div><div className="principle-card"><span>03</span><div><strong>Leave room for doubt</strong><p>Uncertainty is part of honest exploration.</p></div></div><Link to="/about" className="aside-more">Our community guidelines <ArrowUpRight size={14} /></Link></div>
@@ -816,15 +1094,20 @@ function SubmitPage() {
     if (!session || !supabase) return
     setBusy(true)
     setError('')
-    const urls = references.split(/\r?\n/).map((url) => url.trim()).filter(Boolean)
-    if (urls.some((url) => {
-      try { return !['http:', 'https:'].includes(new URL(url).protocol) } catch { return true }
-    })) {
+    const referenceResult = normalizeReferenceUrls(references)
+    if (referenceResult.hasInvalidUrl) {
       setError('Please use a valid https:// or http:// URL for each reference.')
       setBusy(false)
       return
     }
-    let uploadedImage: { path: string; publicUrl: string } | null = null
+    if (referenceResult.hasDuplicates) {
+      setReferences(referenceResult.urls.join('\n'))
+      setError('Duplicate reference links were removed after URL normalization. Review the links, then submit again.')
+      setBusy(false)
+      return
+    }
+    const urls = referenceResult.urls
+    let uploadedImage: { path: string } | null = null
     if (imageFile) {
       try {
         uploadedImage = await uploadArticleImage(imageFile, session.user.id)
@@ -842,7 +1125,7 @@ function SubmitPage() {
       category_id: categoryId,
       evidence: evidence.trim() || null,
       reference_urls: urls,
-      hero_image_url: uploadedImage?.publicUrl ?? null,
+      hero_image_url: uploadedImage?.path ?? null,
       status: 'pending',
     })
     if (insertError) {
@@ -970,6 +1253,7 @@ function ArticlePage() {
   const [revisions, setRevisions] = useState<ArticleRevision[]>([])
   const [revisionError, setRevisionError] = useState('')
   const [saved, setSaved] = useState(false)
+  const heroImage = useArticleImageUrl(article?.hero_image_url ?? null)
   const [reactionCounts, setReactionCounts] = useState<Record<string, number>>({ curious: 0, insightful: 0, inspiring: 0 })
   const [myReactions, setMyReactions] = useState<string[]>([])
   const [reactionBusy, setReactionBusy] = useState('')
@@ -990,7 +1274,7 @@ function ArticlePage() {
 
   useEffect(() => {
     if (!supabase || !article) return
-    void supabase.from('comments').select('id,author_id,body,created_at,author:profiles!comments_author_id_fkey(display_name)').eq('article_id', article.id).eq('status', 'visible').order('created_at', { ascending: false }).limit(50)
+    void supabase.from('comments').select('id,author_id,body,created_at,author:profiles!comments_author_id_fkey(display_name,avatar_url)').eq('article_id', article.id).eq('status', 'visible').order('created_at', { ascending: false }).limit(50)
       .then(({ data, error: queryError }) => {
         if (queryError) setCommentError(queryError.message)
         else setComments((data ?? []) as unknown as typeof comments)
@@ -1053,7 +1337,7 @@ function ArticlePage() {
     event.preventDefault()
     if (!session || !supabase || !article) return
     setCommentError('')
-    const { data, error: insertError } = await supabase.from('comments').insert({ article_id: article.id, author_id: session.user.id, body: comment.trim() }).select('id,author_id,body,created_at,author:profiles!comments_author_id_fkey(display_name)').single()
+    const { data, error: insertError } = await supabase.from('comments').insert({ article_id: article.id, author_id: session.user.id, body: comment.trim() }).select('id,author_id,body,created_at,author:profiles!comments_author_id_fkey(display_name,avatar_url)').single()
     if (insertError) setCommentError(insertError.message)
     else {
       setComments((current) => [data as unknown as typeof comments[number], ...current])
@@ -1122,9 +1406,9 @@ function ArticlePage() {
   return <article className="article-detail">
     <Link to="/explore" className="back-link"><ArrowLeft size={15} /> Back to explore</Link>
     <div className="article-detail-head"><div className="article-card-meta"><ClassificationTag value={article.classification} /><span>{article.category?.name}</span></div><h1>{article.title}</h1><p className="article-summary">{article.summary}</p>
-      <div className="detail-byline"><span className="avatar">{article.author?.display_name?.slice(0, 1) ?? 'A'}</span><span>By <strong>{article.author_id ? <Link to={`/contributors/${article.author_id}`} className="author-profile-link">{article.author?.display_name ?? 'Afterlight editor'}</Link> : article.author?.display_name ?? 'Afterlight editor'}</strong></span><span className="byline-separator">·</span><span>{article.published_at ? new Date(article.published_at).toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' }) : 'Publication date unavailable'}</span><span className="byline-separator">·</span><span>{article.reading_minutes} min read</span><button className={`bookmark-button${saved ? ' bookmark-saved' : ''}`} onClick={() => session ? void toggleBookmark() : navigate('/login')} aria-label={saved ? 'Remove bookmark' : 'Bookmark article'}><Bookmark size={16} fill={saved ? 'currentColor' : 'none'} />{saved ? 'Saved' : 'Save'}</button></div>
+      <div className="detail-byline"><UserAvatar url={article.author?.avatar_url} name={article.author?.display_name ?? 'Afterlight editor'} /><span>By <strong>{article.author_id ? <Link to={`/contributors/${article.author_id}`} className="author-profile-link">{article.author?.display_name ?? 'Afterlight editor'}</Link> : article.author?.display_name ?? 'Afterlight editor'}</strong></span><span className="byline-separator">·</span><span>{article.published_at ? new Date(article.published_at).toLocaleDateString(undefined, { month: 'long', day: 'numeric', year: 'numeric' }) : 'Publication date unavailable'}</span><span className="byline-separator">·</span><span>{article.reading_minutes} min read</span><button className={`bookmark-button${saved ? ' bookmark-saved' : ''}`} onClick={() => session ? void toggleBookmark() : navigate('/login')} aria-label={saved ? 'Remove bookmark' : 'Bookmark article'}><Bookmark size={16} fill={saved ? 'currentColor' : 'none'} />{saved ? 'Saved' : 'Save'}</button></div>
     </div>
-    {article.hero_image_url && <div className="detail-cover" style={{ backgroundImage: `url("${article.hero_image_url}")` }} />}
+    {heroImage.url && <div className="detail-cover"><img className="detail-cover-image" src={heroImage.url} alt="" onLoad={() => heroImage.handleImageLoad(heroImage.url!)} onError={() => heroImage.handleImageError(heroImage.url!)} /></div>}
     <div className="detail-layout"><div className="article-body">
       <div className="detail-label-note"><ClassificationTag value={article.classification} /><span>{classificationDescriptions[article.classification]}</span></div>
       {([
@@ -1159,7 +1443,7 @@ function ArticlePage() {
     <section className="comments-section" id="conversation"><div className="section-heading section-heading-compact"><div><div className="eyebrow"><span className="eyebrow-line" />THE CONVERSATION</div><h2>Questions & perspectives<span className="lime-period">.</span></h2></div></div>
       {commentError && <div className="inline-error">{commentError}</div>}
       {session ? <form className="comment-form" onSubmit={(event) => void addComment(event)}><textarea required minLength={3} maxLength={2000} rows={3} value={comment} onChange={(event) => setComment(event.target.value)} placeholder="Add a thoughtful question or perspective…" /><button className="button-primary"><Send size={15} /> Post comment</button></form> : <div className="comment-signin">Sign in to join the conversation. <Link to="/login">Sign in <ArrowRight size={13} /></Link></div>}
-      {comments.length ? <div className="comment-list">{comments.map((item) => <div className="comment-item" key={item.id}><span className="avatar">{item.author?.display_name?.slice(0, 1) ?? 'A'}</span><div className="comment-content"><div className="comment-heading"><div className="comment-author">{item.author?.display_name ?? 'Community member'} <span>{new Date(item.created_at).toLocaleDateString()}</span></div>{session && item.author_id !== session.user.id && (reportedCommentIds.includes(item.id) ? <span className="comment-reported"><Check size={12} /> Report received</span> : <button className="comment-report-button" onClick={() => { setReportingCommentId(item.id); setReportReason('other'); setReportDetails('') }}><Flag size={12} /> Report</button>)}</div><p>{item.body}</p>{reportingCommentId === item.id && <form className="comment-report-form" onSubmit={(event) => void submitCommentReport(event)}><label className="form-field"><span>Why are you reporting this comment?</span><select value={reportReason} onChange={(event) => setReportReason(event.target.value as CommentReportReason)}><option value="spam">Spam or misleading promotion</option><option value="harassment">Harassment or abuse</option><option value="misinformation">Potentially harmful misinformation</option><option value="personal_information">Personal or private information</option><option value="off_topic">Unrelated or disruptive</option><option value="other">Other concern</option></select></label><label className="form-field"><span>Additional context <small>OPTIONAL · 1000 CHARACTERS</small></span><textarea maxLength={1000} rows={2} value={reportDetails} onChange={(event) => setReportDetails(event.target.value)} placeholder="Share context that can help an editor review this report." /></label><div className="comment-report-actions"><span>Reports are private and reviewed by the editorial team.</span><button type="button" className="button-text" onClick={() => setReportingCommentId('')}>Cancel</button><button className="button-primary" disabled={reportBusy}>{reportBusy ? 'Sending…' : 'Send report'}<Flag size={13} /></button></div></form>}</div></div>)}</div> : <p className="comments-empty">No comments yet. Start with a question.</p>}
+      {comments.length ? <div className="comment-list">{comments.map((item) => <div className="comment-item" key={item.id}><UserAvatar url={item.author?.avatar_url} name={item.author?.display_name ?? 'Community member'} /><div className="comment-content"><div className="comment-heading"><div className="comment-author">{item.author?.display_name ?? 'Community member'} <span>{new Date(item.created_at).toLocaleDateString()}</span></div>{session && item.author_id !== session.user.id && (reportedCommentIds.includes(item.id) ? <span className="comment-reported"><Check size={12} /> Report received</span> : <button className="comment-report-button" onClick={() => { setReportingCommentId(item.id); setReportReason('other'); setReportDetails('') }}><Flag size={12} /> Report</button>)}</div><p>{item.body}</p>{reportingCommentId === item.id && <form className="comment-report-form" onSubmit={(event) => void submitCommentReport(event)}><label className="form-field"><span>Why are you reporting this comment?</span><select value={reportReason} onChange={(event) => setReportReason(event.target.value as CommentReportReason)}><option value="spam">Spam or misleading promotion</option><option value="harassment">Harassment or abuse</option><option value="misinformation">Potentially harmful misinformation</option><option value="personal_information">Personal or private information</option><option value="off_topic">Unrelated or disruptive</option><option value="other">Other concern</option></select></label><label className="form-field"><span>Additional context <small>OPTIONAL · 1000 CHARACTERS</small></span><textarea maxLength={1000} rows={2} value={reportDetails} onChange={(event) => setReportDetails(event.target.value)} placeholder="Share context that can help an editor review this report." /></label><div className="comment-report-actions"><span>Reports are private and reviewed by the editorial team.</span><button type="button" className="button-text" onClick={() => setReportingCommentId('')}>Cancel</button><button className="button-primary" disabled={reportBusy}>{reportBusy ? 'Sending…' : 'Send report'}<Flag size={13} /></button></div></form>}</div></div>)}</div> : <p className="comments-empty">No comments yet. Start with a question.</p>}
     </section>
     <AppFooter />
   </article>
@@ -1172,7 +1456,7 @@ interface ArticleComment {
   author_id: string
   body: string
   created_at: string
-  author: { display_name: string } | null
+  author: { display_name: string; avatar_url: string | null } | null
 }
 
 interface ArticleRevision {
@@ -1203,7 +1487,8 @@ interface ReviewSubmission {
   evidence: string | null
   status: string
   category_id: string
-  author: { display_name: string } | null
+  hero_image_url: string | null
+  author: { display_name: string; avatar_url: string | null } | null
   category: { name: string } | null
 }
 interface MemberSubmission extends ReviewSubmission {
@@ -1229,7 +1514,7 @@ interface EditorialComment {
   body: string
   created_at: string
   status: 'visible' | 'hidden' | 'removed'
-  author: { display_name: string } | null
+  author: { display_name: string; avatar_url: string | null } | null
   article: { title: string; slug: string } | null
 }
 interface CommentReport {
@@ -1242,13 +1527,14 @@ interface CommentReport {
   comment: {
     body: string
     status: 'visible' | 'hidden' | 'removed'
-    author: { display_name: string } | null
+    author: { display_name: string; avatar_url: string | null } | null
     article: { title: string; slug: string } | null
   } | null
 }
 interface AdminProfile {
   id: string
   display_name: string
+  avatar_url: string | null
   role: Role
   created_at: string
 }
@@ -1376,6 +1662,7 @@ function AdminPage() {
   const [categoryName, setCategoryName] = useState('')
   const [categoryDescription, setCategoryDescription] = useState('')
   const [reviewNotes, setReviewNotes] = useState<Record<string, string>>({})
+  const [rejectionNotes, setRejectionNotes] = useState<Record<string, string>>({})
   const [reportResolutionNotes, setReportResolutionNotes] = useState<Record<string, string>>({})
   const tabs: { id: AdminTab; label: string; icon: typeof FileText; adminOnly?: boolean }[] = [
     { id: 'review', label: 'Review queue', icon: FileText },
@@ -1398,7 +1685,7 @@ function AdminPage() {
     setError('')
     if (tab === 'review') {
       const { data, error: queryError } = await supabase.from('submissions')
-        .select('id,title,summary,classification,category_id,status,created_at,reference_urls,evidence,author:profiles!submissions_author_id_fkey(display_name),category:categories(name)')
+        .select('id,title,summary,classification,category_id,status,created_at,reference_urls,evidence,hero_image_url,author:profiles!submissions_author_id_fkey(display_name),category:categories(name)')
         .eq('status', 'pending').order('created_at', { ascending: true })
       if (queryError) setError(queryError.message)
       else setSubmissions((data ?? []) as unknown as ReviewSubmission[])
@@ -1452,7 +1739,7 @@ function AdminPage() {
       if (queryError) setError(queryError.message)
       else setCommentReports((data ?? []) as unknown as CommentReport[])
     } else if (tab === 'people' && isAdministrator) {
-      const { data, error: queryError } = await supabase.from('profiles').select('id,display_name,role,created_at').order('created_at', { ascending: false }).limit(200)
+      const { data, error: queryError } = await supabase.from('profiles').select('id,display_name,avatar_url,role,created_at').order('created_at', { ascending: false }).limit(200)
       if (queryError) setError(queryError.message)
       else setPeople((data ?? []) as AdminProfile[])
     } else if (tab === 'categories') {
@@ -1482,18 +1769,23 @@ function AdminPage() {
 
   useEffect(() => { void loadCurrentTab() }, [tab, canEdit, isAdministrator])
 
-  async function reviewSubmission(id: string, action: 'approve' | 'return') {
+  async function reviewSubmission(id: string, action: 'approve' | 'return' | 'reject') {
     if (!supabase) return
     setWorkingId(id)
     setError('')
     setMessage('')
     const { error: reviewError } = action === 'approve'
       ? await supabase.rpc('approve_submission', { submission_id: id })
-      : await supabase.rpc('reject_submission', { submission_id: id, review_notes: reviewNotes[id]?.trim() ?? '' })
+      : action === 'return'
+        ? await supabase.rpc('reject_submission', { submission_id: id, review_notes: reviewNotes[id]?.trim() ?? '' })
+        : await supabase.rpc('reject_submission_final', { submission_id: id, rejection_notes: rejectionNotes[id]?.trim() ?? '' })
     if (reviewError) setError(reviewError.message)
     else {
-      setMessage(action === 'approve' ? 'The submission is approved. A private editorial draft is ready to edit.' : 'Revision feedback was sent to the author.')
+      setMessage(action === 'approve'
+        ? 'The submission is approved. A private editorial draft is ready to edit.'
+        : action === 'return' ? 'Revision feedback was sent to the author.' : 'The submission was rejected and the author was notified.')
       if (action === 'return') setReviewNotes((current) => { const remaining = { ...current }; delete remaining[id]; return remaining })
+      if (action === 'reject') setRejectionNotes((current) => { const remaining = { ...current }; delete remaining[id]; return remaining })
       await loadCurrentTab()
     }
     setWorkingId('')
@@ -1521,7 +1813,10 @@ function AdminPage() {
     if (!supabase) return
     setWorkingId(comment.id)
     setError('')
-    const { error: updateError } = await supabase.from('comments').update({ status }).eq('id', comment.id)
+    const { error: updateError } = await supabase.rpc('moderate_comment', {
+      p_comment_id: comment.id,
+      p_status: status,
+    })
     if (updateError) setError(updateError.message)
     else {
       setComments((current) => current.map((item) => item.id === comment.id ? { ...item, status } : item))
@@ -1608,12 +1903,12 @@ function AdminPage() {
     {message && <div className="success-message"><Check size={16} />{message}</div>}
     {error && <div className="inline-error">{error}</div>}
     {loading ? <div className="loading-row"><span className="spinner" />Loading the editorial desk…</div> : <>
-      {tab === 'review' && (submissions.length ? <div className="review-list">{submissions.map((submission) => <article className="review-card" key={submission.id}><div className="article-card-meta"><ClassificationTag value={submission.classification} /><span>{submission.category?.name ?? 'Uncategorized'}</span><span>Submitted {new Date(submission.created_at).toLocaleDateString()}</span></div><h2>{submission.title}</h2><p>{submission.summary}</p>{submission.evidence && <div className="review-evidence"><strong>Evidence & context</strong><p>{submission.evidence}</p></div>}{submission.reference_urls.length > 0 && <div className="review-references"><strong>References — verify in the References tab before approval</strong>{submission.reference_urls.map((url) => <a key={url} href={url} target="_blank" rel="noreferrer">{url}<ExternalLink size={13} /></a>)}</div>}<label className="form-field review-feedback"><span>Actionable feedback for the author <small>REQUIRED TO REQUEST CHANGES</small></span><textarea required minLength={20} maxLength={2000} rows={3} value={reviewNotes[submission.id] ?? ''} onChange={(event) => setReviewNotes((current) => ({ ...current, [submission.id]: event.target.value }))} placeholder="Explain what needs revision and why. Include source or uncertainty guidance where relevant." /></label><div className="review-actions"><span>By {submission.author?.display_name ?? 'Community member'}</span><div><button className="button-secondary" disabled={workingId === submission.id || (reviewNotes[submission.id]?.trim().length ?? 0) < 20} onClick={() => void reviewSubmission(submission.id, 'return')}>Request changes</button><button className="button-primary" disabled={workingId === submission.id} onClick={() => void reviewSubmission(submission.id, 'approve')}>{workingId === submission.id ? 'Reviewing…' : 'Approve & create draft'}<ArrowRight size={14} /></button></div></div></article>)}</div> : <EmptyState title="The review queue is clear." description="New member ideas will appear here when they're ready for editorial review." />)}
+      {tab === 'review' && (submissions.length ? <div className="review-list">{submissions.map((submission) => <article className="review-card" key={submission.id}><div className="article-card-meta"><ClassificationTag value={submission.classification} /><span>{submission.category?.name ?? 'Uncategorized'}</span><span>Submitted {new Date(submission.created_at).toLocaleDateString()}</span></div><h2>{submission.title}</h2><p>{submission.summary}</p><SubmissionReviewImage value={submission.hero_image_url} title={submission.title} />{submission.evidence && <div className="review-evidence"><strong>Evidence & context</strong><p>{submission.evidence}</p></div>}{submission.reference_urls.length > 0 && <div className="review-references"><strong>References — verify in the References tab before approval</strong>{submission.reference_urls.map((url) => <a key={url} href={url} target="_blank" rel="noreferrer">{url}<ExternalLink size={13} /></a>)}</div>}<label className="form-field review-feedback"><span>Actionable feedback for the author <small>REQUIRED TO REQUEST CHANGES</small></span><textarea required minLength={20} maxLength={2000} rows={3} value={reviewNotes[submission.id] ?? ''} onChange={(event) => setReviewNotes((current) => ({ ...current, [submission.id]: event.target.value }))} placeholder="Explain what needs revision and why. Include source or uncertainty guidance where relevant." /></label><label className="form-field review-feedback"><span>Rejection explanation <small>REQUIRED · 20–2000 CHARACTERS</small></span><textarea required minLength={20} maxLength={2000} rows={3} value={rejectionNotes[submission.id] ?? ''} onChange={(event) => setRejectionNotes((current) => ({ ...current, [submission.id]: event.target.value }))} placeholder="Explain why this submission is being declined." /></label><div className="review-actions"><span>By {submission.author?.display_name ?? 'Community member'}</span><div><button className="button-secondary" disabled={workingId === submission.id || (reviewNotes[submission.id]?.trim().length ?? 0) < 20} onClick={() => void reviewSubmission(submission.id, 'return')}>Request changes</button><button className="button-secondary review-reject-button" disabled={workingId === submission.id || (rejectionNotes[submission.id]?.trim().length ?? 0) < 20} onClick={() => void reviewSubmission(submission.id, 'reject')}>Reject Submission</button><button className="button-primary" disabled={workingId === submission.id} onClick={() => void reviewSubmission(submission.id, 'approve')}>{workingId === submission.id ? 'Reviewing…' : 'Approve & create draft'}<ArrowRight size={14} /></button></div></div></article>)}</div> : <EmptyState title="The review queue is clear." description="New member ideas will appear here when they're ready for editorial review." />)}
       {tab === 'references' && (references.length ? <div className="reference-review-list">{references.map((reference) => <article className="reference-review-card" key={`${reference.kind}-${reference.id}`}><div><div className="eyebrow">{reference.submission ? `SUBMISSION · ${reference.submission.title}` : `PUBLISHED NOTE · ${reference.article?.title ?? 'Untitled article'}`}</div><a href={reference.url} target="_blank" rel="noreferrer">{reference.url}<ExternalLink size={13} /></a></div><span className={`reference-status reference-${reference.verification_status}`}>{reference.verification_status.replace('_', ' ')}</span><div className="reference-actions"><button className="button-secondary" disabled={workingId === reference.id} onClick={() => void updateReference(reference, 'needs_attention')}>Needs attention</button><button className="button-primary" disabled={workingId === reference.id} onClick={() => void updateReference(reference, 'verified')}><Check size={14} />Verify source</button></div></article>)}</div> : <EmptyState title="No references need review." description="References attached to pending submissions will appear here. All references must be verified before an idea can be published." />)}
       {tab === 'articles' && (articles.length ? <div className="article-management-list">{articles.map((article) => <ArticleEditor article={article} categories={categories.length ? categories : []} key={article.id} onSaved={() => { setMessage(article.status === 'draft' ? 'The note is published.' : 'Article changes saved.'); void loadCurrentTab() }} />)}</div> : <EmptyState title="No articles to edit yet." description="Approved submissions appear here as editorial drafts. Published notes remain available for updates." />)}
       {tab === 'comments' && (comments.length ? <div className="moderation-list">{comments.map((comment) => <article className="moderation-card" key={comment.id}><div className="article-card-meta"><span className={`reference-status reference-${comment.status}`}>{comment.status}</span><span>{comment.author?.display_name ?? 'Community member'}</span><span>{new Date(comment.created_at).toLocaleDateString()}</span></div><p>{comment.body}</p><Link to={`/article/${comment.article?.slug ?? ''}`} className="moderation-article">{comment.article?.title ?? 'Article unavailable'} <ArrowUpRight size={13} /></Link><div className="moderation-actions"><button className="button-secondary" disabled={workingId === comment.id} onClick={() => void moderateComment(comment, comment.status === 'visible' ? 'hidden' : 'visible')}>{comment.status === 'visible' ? 'Hide comment' : 'Restore comment'}</button><button className="button-secondary" disabled={workingId === comment.id || comment.status === 'removed'} onClick={() => void moderateComment(comment, 'removed')}>Remove comment</button></div></article>)}</div> : <EmptyState title="No comments to moderate." description="Community comments will appear here as readers join the conversation." />)}
       {tab === 'reports' && (commentReports.length ? <div className="moderation-list">{commentReports.map((report) => <article className="moderation-card report-card" key={report.id}><div className="article-card-meta"><span className="reference-status reference-pending">OPEN REPORT</span><span>{report.reason.replace(/_/g, ' ')}</span><span>Reported {new Date(report.created_at).toLocaleDateString()}</span></div><div className="report-context"><div><strong>Comment by {report.comment?.author?.display_name ?? 'Community member'}</strong><p>{report.comment?.body ?? 'The reported comment is unavailable.'}</p></div><div><span>Reported by {report.reporter?.display_name ?? 'Community member'}</span>{report.details && <p>{report.details}</p>}</div></div><Link to={`/article/${report.comment?.article?.slug ?? ''}`} className="moderation-article">{report.comment?.article?.title ?? 'Article unavailable'} <ArrowUpRight size={13} /></Link><label className="form-field report-resolution"><span>Editorial resolution note <small>REQUIRED · 10–1000 CHARACTERS</small></span><textarea required minLength={10} maxLength={1000} rows={2} value={reportResolutionNotes[report.id] ?? ''} onChange={(event) => setReportResolutionNotes((current) => ({ ...current, [report.id]: event.target.value }))} placeholder="Record the reason for dismissing this report or taking action." /></label><div className="moderation-actions"><button className="button-secondary" disabled={workingId === report.id || (reportResolutionNotes[report.id]?.trim().length ?? 0) < 10} onClick={() => void resolveCommentReport(report, 'dismiss')}>Dismiss</button><button className="button-secondary" disabled={workingId === report.id || (reportResolutionNotes[report.id]?.trim().length ?? 0) < 10} onClick={() => void resolveCommentReport(report, 'hide')}>Hide comment</button><button className="button-primary" disabled={workingId === report.id || (reportResolutionNotes[report.id]?.trim().length ?? 0) < 10} onClick={() => void resolveCommentReport(report, 'remove')}>{workingId === report.id ? 'Resolving…' : 'Remove comment'}</button></div></article>)}</div> : <EmptyState title="No open reports." description="Reader reports about visible comments appear here for private editorial review." />)}
-      {tab === 'people' && isAdministrator && <div className="people-list">{people.map((person) => <div className="people-row" key={person.id}><span className="avatar">{person.display_name.slice(0, 1).toUpperCase()}</span><div className="people-info"><strong>{person.display_name}</strong><span>Joined {new Date(person.created_at).toLocaleDateString()}</span></div><select aria-label={`Role for ${person.display_name}`} value={person.role} disabled={person.id === profile?.id || workingId === person.id} onChange={(event) => void updateRole(person, event.target.value as Role)}>{(['member', 'contributor', 'editor', 'administrator'] as Role[]).map((role) => <option key={role} value={role}>{role}</option>)}</select>{person.id === profile?.id && <span className="self-role-note">Your role</span>}</div>)}{people.length === 0 && <EmptyState title="No member profiles found." description="New members will appear here after their first registration." />}</div>}
+      {tab === 'people' && isAdministrator && <div className="people-list">{people.map((person) => <div className="people-row" key={person.id}><UserAvatar url={person.avatar_url} name={person.display_name} /><div className="people-info"><strong>{person.display_name}</strong><span>Joined {new Date(person.created_at).toLocaleDateString()}</span></div><select aria-label={`Role for ${person.display_name}`} value={person.role} disabled={person.id === profile?.id || workingId === person.id} onChange={(event) => void updateRole(person, event.target.value as Role)}>{(['member', 'contributor', 'editor', 'administrator'] as Role[]).map((role) => <option key={role} value={role}>{role}</option>)}</select>{person.id === profile?.id && <span className="self-role-note">Your role</span>}</div>)}{people.length === 0 && <EmptyState title="No member profiles found." description="New members will appear here after their first registration." />}</div>}
       {tab === 'categories' && <div className="category-management"><form className="category-create-form" onSubmit={(event) => void createCategory(event)}><div className="eyebrow"><span className="eyebrow-line" />ADD A FIELD</div><label className="form-field"><span>Category name</span><input required minLength={2} maxLength={60} value={categoryName} onChange={(event) => setCategoryName(event.target.value)} placeholder="e.g. Agriculture" /></label><label className="form-field"><span>Description</span><input value={categoryDescription} onChange={(event) => setCategoryDescription(event.target.value)} maxLength={300} placeholder="What belongs in this field?" /></label><button className="button-primary" disabled={workingId === 'new-category'}><Plus size={14} />Create category</button></form><div className="category-manage-list">{categories.map((category) => <div className="category-manage-row" key={category.id}><div><strong>{category.name}</strong><span>/{category.slug}</span>{category.description && <p>{category.description}</p>}</div><span className={`reference-status ${category.is_active ? 'reference-verified' : 'reference-hidden'}`}>{category.is_active ? 'active' : 'archived'}</span><button className="button-secondary" disabled={workingId === category.id} onClick={() => void toggleCategory(category)}>{category.is_active ? 'Archive' : 'Reactivate'}</button></div>)}</div></div>}
       {tab === 'statistics' && <div className="stats-grid">{stats.map(({ label, count }) => <div className="stat-card" key={label}><div className="eyebrow">{label}</div><strong>{count.toLocaleString()}</strong><span>Live database count</span></div>)}</div>}
     </>}
@@ -1638,13 +1933,17 @@ function SubmissionRevisionForm({ submission, categories, onResubmitted }: {
   async function resubmit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault()
     if (!supabase) return
-    const urls = referenceText.split(/\r?\n/).map((url) => url.trim()).filter(Boolean)
-    if (urls.some((url) => {
-      try { return !['http:', 'https:'].includes(new URL(url).protocol) } catch { return true }
-    })) {
+    const referenceResult = normalizeReferenceUrls(referenceText)
+    if (referenceResult.hasInvalidUrl) {
       setError('Use a valid http:// or https:// URL for each reference.')
       return
     }
+    if (referenceResult.hasDuplicates) {
+      setReferenceText(referenceResult.urls.join('\n'))
+      setError('Duplicate reference links were removed after URL normalization. Review the links, then resubmit.')
+      return
+    }
+    const urls = referenceResult.urls
 
     setBusy(true)
     setError('')
@@ -1734,7 +2033,7 @@ function ContributorProfilePage() {
     <Link to="/community" className="back-link"><ArrowLeft size={15} /> Back to community</Link>
     {error && <div className="inline-error">{error}</div>}
     <header className="contributor-hero">
-      {contributor.avatar_url ? <img className="contributor-avatar-image" src={contributor.avatar_url} alt="" /> : <span className="avatar contributor-avatar">{contributor.display_name.slice(0, 1).toUpperCase()}</span>}
+      <UserAvatar url={contributor.avatar_url} name={contributor.display_name} className="avatar contributor-avatar-image" fallbackClassName="avatar contributor-avatar" />
       <div className="contributor-identity"><div className="eyebrow"><span className="eyebrow-line" />AFTERLIGHT CONTRIBUTOR</div><h1>{contributor.display_name}</h1><p>{contributor.bio || 'This contributor hasn’t added a public bio yet.'}</p><span className="contributor-since">CONTRIBUTING SINCE {new Date(contributor.created_at).toLocaleDateString(undefined, { month: 'long', year: 'numeric' })}</span></div>
       <div className="contributor-note-count"><strong>{articles.length}</strong><span>PUBLISHED<br />{articles.length === 1 ? 'FIELD NOTE' : 'FIELD NOTES'}</span></div>
     </header>
@@ -1749,7 +2048,6 @@ function ContributorProfilePage() {
 function ProfilePage() {
   const { session, profile, refreshProfile } = useAuth()
   const [displayName, setDisplayName] = useState(profile?.display_name ?? '')
-  const [avatarUrl, setAvatarUrl] = useState(profile?.avatar_url ?? '')
   const [bio, setBio] = useState(profile?.bio ?? '')
   const [bookmarks, setBookmarks] = useState<Article[]>([])
   const [submissions, setSubmissions] = useState<MemberSubmission[]>([])
@@ -1761,7 +2059,6 @@ function ProfilePage() {
 
   useEffect(() => {
     setDisplayName(profile?.display_name ?? '')
-    setAvatarUrl(profile?.avatar_url ?? '')
     setBio(profile?.bio ?? '')
   }, [profile])
 
@@ -1795,19 +2092,8 @@ function ProfilePage() {
     setBusy(true)
     setError('')
     setSaved(false)
-    const url = avatarUrl.trim()
-    if (url) {
-      try {
-        if (!['http:', 'https:'].includes(new URL(url).protocol)) throw new Error('Only http and https image URLs are supported.')
-      } catch (validationError) {
-        setError(validationError instanceof Error ? validationError.message : 'Enter a valid image URL.')
-        setBusy(false)
-        return
-      }
-    }
     const { error: updateError } = await supabase.from('profiles').update({
       display_name: displayName.trim(),
-      avatar_url: url || null,
       bio: bio.trim() || null,
     }).eq('id', session.user.id)
     if (updateError) setError(updateError.message)
@@ -1829,7 +2115,7 @@ function ProfilePage() {
     </PageIntro>
     {error && <div className="inline-error">{error}</div>}
     {saved && <div className="success-message"><Check size={16} />Profile updated.</div>}
-    <div className="profile-layout"><form className="profile-form" onSubmit={(event) => void saveProfile(event)}><div className="profile-form-heading">{avatarUrl.trim() ? <img className="avatar profile-avatar-image" src={avatarUrl.trim()} alt="" /> : <span className="avatar profile-avatar">{displayName.slice(0, 1).toUpperCase() || 'A'}</span>}<div><div className="eyebrow">{profile?.role ?? 'MEMBER'}</div><strong>{session.user.email}</strong></div></div><label className="form-field"><span>Display name</span><input required minLength={1} maxLength={80} value={displayName} onChange={(event) => setDisplayName(event.target.value)} /></label><label className="form-field"><span>Short public bio <small>OPTIONAL · 280 CHARACTERS</small></span><textarea maxLength={280} rows={3} value={bio} onChange={(event) => setBio(event.target.value)} placeholder="What are you curious about?" /></label><div className="profile-bio-count">{bio.length}/280 · Shown on your public contributor profile</div><label className="form-field"><span>Avatar image URL <small>OPTIONAL</small></span><input type="url" value={avatarUrl} onChange={(event) => setAvatarUrl(event.target.value)} placeholder="https://…" /></label><div className="profile-role-note"><LockKeyhole size={14} />Account roles are assigned by an administrator. You cannot promote your own account.</div><button className="button-primary" disabled={busy}>{busy ? 'Saving…' : 'Save profile'}<Check size={15} /></button></form>
+    <div className="profile-layout"><form className="profile-form" onSubmit={(event) => void saveProfile(event)}><div className="profile-form-heading"><UserAvatar url={profile?.avatar_url} name={displayName || 'Afterlight'} className="avatar profile-avatar-image" fallbackClassName="avatar profile-avatar" /><div><div className="eyebrow">{profile?.role ?? 'MEMBER'}</div><strong>{session.user.email}</strong></div></div><ProfilePhotoEditor profileId={session.user.id} displayName={displayName} photoUrl={profile?.avatar_url ?? null} refreshProfile={refreshProfile} /><label className="form-field"><span>Display name</span><input required minLength={1} maxLength={80} value={displayName} onChange={(event) => setDisplayName(event.target.value)} /></label><label className="form-field"><span>Short public bio <small>OPTIONAL · 280 CHARACTERS</small></span><textarea maxLength={280} rows={3} value={bio} onChange={(event) => setBio(event.target.value)} placeholder="What are you curious about?" /></label><div className="profile-bio-count">{bio.length}/280 · Shown on your public contributor profile</div><div className="profile-role-note"><LockKeyhole size={14} />Account roles are assigned by an administrator. You cannot promote your own account.</div><button className="button-primary" disabled={busy}>{busy ? 'Saving…' : 'Save profile'}<Check size={15} /></button></form>
       <section className="profile-submissions"><div className="eyebrow"><span className="eyebrow-line" />YOUR SUBMISSIONS</div>{loading ? <div className="loading-row"><span className="spinner" />Loading your notes…</div> : submissions.length ? submissions.map((submission) => {
         const latestReview = [...submission.editorial_reviews].sort((a, b) => Date.parse(b.created_at) - Date.parse(a.created_at))[0]
         const statusTone = submission.status === 'published' ? 'verified' : submission.status === 'pending' ? 'pending' : submission.status === 'approved' ? 'verified' : 'hidden'
