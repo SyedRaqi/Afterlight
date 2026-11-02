@@ -1,21 +1,24 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
+import { lazy, Suspense, useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } from 'react'
 import { Link, NavLink, Route, Routes, useNavigate, useParams, useSearchParams } from 'react-router-dom'
 import { AnimatePresence, motion } from 'framer-motion'
 import {
   ArrowDownRight, ArrowLeft, ArrowRight, ArrowUpRight, Atom, Bookmark,
-  BarChart3, Bell, Check, ChevronDown, CircleHelp, Compass, ExternalLink, Feather, FileText, Filter,
+  Bell, Check, ChevronDown, CircleHelp, Compass, ExternalLink, Feather, Filter,
   Flag, FlaskConical, Globe2, Layers3, Leaf, LockKeyhole, LogIn, Menu, MessageCircle,
-  MessageSquare, Orbit, Plus, Search, Send, ShieldCheck, Sparkles, Tags, Telescope, UserRound, Users, X,
+  Orbit, Plus, Search, Send, ShieldCheck, Sparkles, Telescope, UserRound, X,
 } from 'lucide-react'
 import { AuthProvider, useAuth } from './lib/auth'
 import { getArticleImageUrl, removeArticleImage, uploadArticleImage, type ResolvedArticleImageUrl } from './lib/storage'
 import { getOwnedProfilePhotoPath, removeProfilePhoto, uploadProfilePhoto, validateProfilePhoto } from './lib/profilePhotos'
 import { normalizeReferenceUrls } from './lib/referenceUrls'
 import { backendConfigured, supabase } from './lib/supabase'
-import type { Article, Category, Classification, Notification, Role } from './lib/types'
+import type { Article, Category, Classification, Notification } from './lib/types'
 
-const classifications: Classification[] = ['FACT', 'RESEARCH', 'PREDICTION', 'POSSIBILITY', 'IMAGINATION']
+export const classifications: Classification[] = ['FACT', 'RESEARCH', 'PREDICTION', 'POSSIBILITY', 'IMAGINATION']
 const categoryFallback = ['Technology', 'Environment', 'Space', 'Education', 'Society', 'Health', 'Economy']
+
+const ResearchAssistantPage = lazy(() => import('./pages/ResearchAssistantPage'))
+const AdminPage = lazy(() => import('./pages/AdminPage'))
 
 type ArticleImageState = Omit<ResolvedArticleImageUrl, 'url'> & {
   value: string | null
@@ -115,7 +118,7 @@ function useArticleImageUrl(value: string | null) {
   return { ...image, handleImageLoad, handleImageError }
 }
 
-function SubmissionReviewImage({ value, title }: { value: string | null; title: string }) {
+export function SubmissionReviewImage({ value, title }: { value: string | null; title: string }) {
   const image = useArticleImageUrl(value)
   if (!value) return null
   if (image.status === 'loading') return <div className="review-image-state" role="status">Loading private submission image…</div>
@@ -171,7 +174,7 @@ function Mark({ small = false }: { small?: boolean }) {
   )
 }
 
-function UserAvatar({ url, name, className = 'avatar', fallbackClassName = className }: {
+export function UserAvatar({ url, name, className = 'avatar', fallbackClassName = className }: {
   url: string | null | undefined
   name: string
   className?: string
@@ -525,7 +528,7 @@ function NotificationBell({ userId }: { userId: string }) {
   </div>
 }
 
-function PageIntro({ eyebrow, title, description, children }: { eyebrow: string; title: string; description: string; children?: ReactNode }) {
+export function PageIntro({ eyebrow, title, description, children }: { eyebrow: string; title: string; description: string; children?: ReactNode }) {
   return (
     <div className="page-intro">
       <div>
@@ -538,7 +541,7 @@ function PageIntro({ eyebrow, title, description, children }: { eyebrow: string;
   )
 }
 
-function ConnectionNotice() {
+export function ConnectionNotice() {
   if (backendConfigured) return null
   return (
     <div className="connection-notice">
@@ -548,7 +551,7 @@ function ConnectionNotice() {
   )
 }
 
-function EmptyState({ title, description, action }: { title: string; description: string; action?: ReactNode }) {
+export function EmptyState({ title, description, action }: { title: string; description: string; action?: ReactNode }) {
   return (
     <div className="empty-state">
       <div className="empty-orbit"><Orbit size={23} strokeWidth={1.4} /></div>
@@ -559,7 +562,7 @@ function EmptyState({ title, description, action }: { title: string; description
   )
 }
 
-function ClassificationTag({ value }: { value: Classification }) {
+export function ClassificationTag({ value }: { value: Classification }) {
   return <span className={`classification-tag tag-${value.toLowerCase()}`}><span className="tag-dot" />{value}</span>
 }
 
@@ -824,23 +827,6 @@ function DiscoverPage() {
   )
 }
 
-interface AssistantCitation {
-  id: string
-  title: string
-  url: string
-  publisher: string | null
-  articleTitle: string
-  articleSlug: string
-  classification: Classification
-}
-
-interface AssistantResult {
-  answer: string
-  uncertainty: string
-  citations: AssistantCitation[]
-  generated: boolean
-}
-
 interface CommunityHighlight {
   article_id: string
   title: string
@@ -871,79 +857,6 @@ interface CommunityContributor {
   avatarUrl: string | null
   articleCount: number
   latestArticle: { title: string; slug: string }
-}
-
-function ResearchAssistantPage() {
-  const { session, loading: authLoading } = useAuth()
-  const [question, setQuestion] = useState('')
-  const [answer, setAnswer] = useState<AssistantResult | null>(null)
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
-
-  async function askQuestion(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    if (!supabase || !session) return
-
-    setBusy(true)
-    setError('')
-    setAnswer(null)
-    try {
-      const { data, error: invokeError } = await supabase.functions.invoke<AssistantResult>('research-assistant', {
-        body: { question: question.trim() },
-      })
-      if (invokeError) {
-        const context = invokeError.context
-        if (context instanceof Response) {
-          const payload = await context.json().catch(() => null) as { error?: string } | null
-          setError(payload?.error ?? invokeError.message)
-        } else {
-          setError(invokeError.message)
-        }
-      } else if (data) {
-        setAnswer(data)
-      } else {
-        setError('The assistant returned no response. Please try again.')
-      }
-    } catch (requestError) {
-      setError(requestError instanceof Error ? requestError.message : 'The assistant could not complete this request.')
-    } finally {
-      setBusy(false)
-    }
-  }
-
-  return <div className="assistant-page">
-    <PageIntro eyebrow="AI RESEARCH ASSISTANT" title="Follow the evidence." description="Explore questions through published AFTERLIGHT notes. The assistant can help connect ideas and surface uncertainty; it is not a source of verified facts." />
-    <div className="assistant-disclosure"><ShieldCheck size={17} /><p><strong>Grounded in the published field notes.</strong> Questions and excerpts from relevant notes are sent to OpenAI to generate a response. AFTERLIGHT does not save this conversation. Please don’t include personal or confidential details.</p></div>
-    {!backendConfigured && <ConnectionNotice />}
-    {backendConfigured && !authLoading && !session && <div className="login-prompt"><LockKeyhole size={20} /><div><strong>Sign in to ask a research question.</strong><p>Your question is sent to OpenAI only after you submit it.</p></div><Link to="/login" className="button-text">Sign in <ArrowRight size={14} /></Link></div>}
-    {authLoading && <div className="loading-row"><span className="spinner" />Checking your session…</div>}
-    {session && <div className="assistant-layout">
-      <aside className="assistant-guide">
-        <div className="eyebrow"><span className="eyebrow-line" />A CAREFUL COMPANION</div>
-        <h2>Curiosity, with context.</h2>
-        <p>Ask what evidence suggests, what remains uncertain, or how different published notes compare.</p>
-        <ul><li>Answers use published AFTERLIGHT notes only.</li><li>Source links are matched against verified references.</li><li>AI responses are not editorially reviewed or marked as facts.</li></ul>
-        <Link to="/explore" className="button-text">Browse field notes <ArrowRight size={14} /></Link>
-      </aside>
-      <section className="assistant-workspace" aria-label="Ask the research assistant">
-        <div className="assistant-workspace-head"><span className="assistant-icon"><Sparkles size={17} /></span><div><strong>Ask a question</strong><span>Answers draw only from the published AFTERLIGHT library</span></div></div>
-        <form className="assistant-form" onSubmit={(event) => void askQuestion(event)}>
-          <label className="form-field"><span>Your research question <small>{question.length}/1000</small></span><textarea required minLength={12} maxLength={1000} rows={5} value={question} onChange={(event) => setQuestion(event.target.value)} placeholder="What evidence in the published notes suggests how urban heat may change over time?" /></label>
-          <div className="assistant-form-foot"><span><LockKeyhole size={13} /> Sent to OpenAI; not saved by AFTERLIGHT</span><button className="button-primary" disabled={busy || question.trim().length < 12}>{busy ? <><span className="spinner spinner-small" />Thinking…</> : <><Send size={14} />Ask the assistant</>}</button></div>
-        </form>
-        {error && <div className="inline-error" role="alert">{error}</div>}
-        {busy && <div className="assistant-loading" role="status"><span className="spinner" /><span>Comparing published notes and their verified references…</span></div>}
-        {answer && <article className="assistant-answer" aria-live="polite">
-          <div className="assistant-answer-label"><Sparkles size={13} />{answer.generated ? 'AI-GENERATED · NOT VERIFIED' : 'FIELD NOTES · NO CLEAR MATCH'}</div>
-          <p className="assistant-answer-copy">{answer.answer}</p>
-          {answer.uncertainty && <div className="assistant-uncertainty"><strong>Uncertainty & limits</strong><p>{answer.uncertainty}</p></div>}
-          {answer.citations.length > 0 && <div className="assistant-citations"><strong>References from published notes</strong>{answer.citations.map((citation) => <div className="assistant-citation" key={citation.id}><a href={citation.url} target="_blank" rel="noreferrer"><span>{citation.title}{citation.publisher && <small>{citation.publisher}</small>}</span><ExternalLink size={13} /></a><div><ClassificationTag value={citation.classification} /><Link to={`/article/${citation.articleSlug}`}>{citation.articleTitle} <ArrowUpRight size={12} /></Link></div></div>)}</div>}
-          <p className="assistant-disclaimer">AI-generated and not independently verified. Check the linked notes and sources before relying on any claim.</p>
-        </article>}
-      </section>
-    </div>}
-    <AppFooter />
-  </div>
 }
 
 function CommunityPage() {
@@ -1476,8 +1389,7 @@ interface ArticleRevision {
   created_at: string
 }
 
-type AdminTab = 'review' | 'references' | 'articles' | 'comments' | 'reports' | 'people' | 'categories' | 'statistics'
-interface ReviewSubmission {
+interface MemberSubmission {
   id: string
   title: string
   summary: string
@@ -1488,432 +1400,7 @@ interface ReviewSubmission {
   status: string
   category_id: string
   hero_image_url: string | null
-  author: { display_name: string; avatar_url: string | null } | null
-  category: { name: string } | null
-}
-interface MemberSubmission extends ReviewSubmission {
-  reference_urls: string[]
-  hero_image_url: string | null
   editorial_reviews: { id: string; decision: string; notes: string | null; created_at: string }[]
-}
-interface ReferenceReview {
-  id: string
-  url: string
-  verification_status: 'pending' | 'verified' | 'needs_attention'
-  kind: 'submission' | 'article'
-  submission: { title: string; status: string } | null
-  article: { title: string; slug: string } | null
-}
-interface EditorialArticle extends Article {
-  body: string
-  status: string
-  category_id: string
-}
-interface EditorialComment {
-  id: string
-  body: string
-  created_at: string
-  status: 'visible' | 'hidden' | 'removed'
-  author: { display_name: string; avatar_url: string | null } | null
-  article: { title: string; slug: string } | null
-}
-interface CommentReport {
-  id: string
-  comment_id: string
-  reason: CommentReportReason
-  details: string | null
-  created_at: string
-  reporter: { display_name: string } | null
-  comment: {
-    body: string
-    status: 'visible' | 'hidden' | 'removed'
-    author: { display_name: string; avatar_url: string | null } | null
-    article: { title: string; slug: string } | null
-  } | null
-}
-interface AdminProfile {
-  id: string
-  display_name: string
-  avatar_url: string | null
-  role: Role
-  created_at: string
-}
-interface AdminCategory extends Category {
-  is_active: boolean
-}
-
-function ArticleEditor({ article, categories, onSaved }: { article: EditorialArticle; categories: AdminCategory[]; onSaved: () => void }) {
-  const [title, setTitle] = useState(article.title)
-  const [summary, setSummary] = useState(article.summary)
-  const [body, setBody] = useState(article.body)
-  const [introduction, setIntroduction] = useState(article.introduction ?? '')
-  const [background, setBackground] = useState(article.background ?? '')
-  const [currentUnderstanding, setCurrentUnderstanding] = useState(article.current_understanding ?? '')
-  const [futurePossibilities, setFuturePossibilities] = useState(article.future_possibilities ?? '')
-  const [limitations, setLimitations] = useState(article.limitations ?? '')
-  const [classification, setClassification] = useState<Classification>(article.classification)
-  const [categoryId, setCategoryId] = useState(article.category_id)
-  const [changeNote, setChangeNote] = useState('')
-  const [busy, setBusy] = useState(false)
-  const [error, setError] = useState('')
-  const [saved, setSaved] = useState(false)
-
-  const publishedContentChanged = article.status === 'published' && (
-    title.trim() !== article.title ||
-    summary.trim() !== article.summary ||
-    body.trim() !== article.body ||
-    (introduction.trim() || null) !== article.introduction ||
-    (background.trim() || null) !== article.background ||
-    (currentUnderstanding.trim() || null) !== article.current_understanding ||
-    (futurePossibilities.trim() || null) !== article.future_possibilities ||
-    (limitations.trim() || null) !== article.limitations ||
-    classification !== article.classification ||
-    categoryId !== article.category_id
-  )
-
-  async function saveArticleChanges() {
-    if (!supabase) return false
-    setError('')
-    setSaved(false)
-    if (publishedContentChanged && changeNote.trim().length < 20) {
-      setError('Add a change note of at least 20 characters to explain this published update.')
-      return false
-    }
-    const { error: updateError } = await supabase.from('articles').update({
-      title: title.trim(),
-      summary: summary.trim(),
-      body: body.trim(),
-      introduction: introduction.trim() || null,
-      background: background.trim() || null,
-      current_understanding: currentUnderstanding.trim() || null,
-      future_possibilities: futurePossibilities.trim() || null,
-      limitations: limitations.trim() || null,
-      classification,
-      category_id: categoryId,
-      change_note: publishedContentChanged ? changeNote.trim() : null,
-    }).eq('id', article.id)
-    if (updateError) {
-      setError(updateError.message)
-      return false
-    }
-    setSaved(true)
-    if (publishedContentChanged) {
-      setChangeNote('')
-      onSaved()
-    }
-    return true
-  }
-
-  async function saveArticle(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    setBusy(true)
-    await saveArticleChanges()
-    setBusy(false)
-  }
-
-  async function publishArticle() {
-    if (!supabase) return
-    setBusy(true)
-    setError('')
-    if (await saveArticleChanges()) {
-      const { error: publishError } = await supabase.rpc('publish_article', { article_id: article.id })
-      if (publishError) setError(publishError.message)
-      else onSaved()
-    }
-    setBusy(false)
-  }
-
-  return <form className="article-edit-form" onSubmit={(event) => void saveArticle(event)}>
-    <div className="article-edit-top"><div><div className="eyebrow">{article.status.toUpperCase()} FIELD NOTE</div><Link to={article.status === 'published' ? `/article/${article.slug}` : '#'} target={article.status === 'published' ? '_blank' : undefined} onClick={(event) => { if (article.status !== 'published') event.preventDefault() }} className="article-edit-link">{article.status === 'published' ? 'Preview published note' : 'Draft · visible to editors only'}{article.status === 'published' && <ExternalLink size={13} />}</Link></div><span className="article-edit-author">{article.author?.display_name ?? 'Afterlight editor'}</span></div>
-    <label className="form-field"><span>Title</span><input required minLength={8} maxLength={140} value={title} onChange={(event) => setTitle(event.target.value)} /></label>
-    <label className="form-field"><span>Summary</span><textarea required value={summary} onChange={(event) => setSummary(event.target.value)} rows={3} /></label>
-    <div className="article-sections-editor"><div className="eyebrow"><span className="eyebrow-line" />ARTICLE SECTIONS</div><p>Keep established understanding, future scenarios, and uncertainty in clearly named sections.</p>
-      <label className="form-field"><span>Introduction</span><textarea value={introduction} onChange={(event) => setIntroduction(event.target.value)} rows={3} placeholder="Orient readers to the question, context, and classification." /></label>
-      <label className="form-field"><span>Background</span><textarea value={background} onChange={(event) => setBackground(event.target.value)} rows={3} placeholder="Relevant context and how we arrived here." /></label>
-      <label className="form-field"><span>Current scientific understanding</span><textarea value={currentUnderstanding} onChange={(event) => setCurrentUnderstanding(event.target.value)} rows={4} placeholder="What current evidence supports, and what remains under investigation." /></label>
-      <label className="form-field"><span>Future possibilities</span><textarea value={futurePossibilities} onChange={(event) => setFuturePossibilities(event.target.value)} rows={4} placeholder="Clearly distinguish predictions, scenarios, and imaginative ideas." /></label>
-      <label className="form-field"><span>Limitations & uncertainties</span><textarea value={limitations} onChange={(event) => setLimitations(event.target.value)} rows={3} placeholder="Assumptions, open questions, and limits of available evidence." /></label>
-    </div>
-    <label className="form-field"><span>Additional context <small>OPTIONAL</small></span><textarea value={body} onChange={(event) => setBody(event.target.value)} rows={4} /></label>
-    <div className="form-row"><label className="form-field"><span>Classification</span><select value={classification} onChange={(event) => setClassification(event.target.value as Classification)}>{classifications.map((item) => <option value={item} key={item}>{item}</option>)}</select></label><label className="form-field"><span>Category</span><select value={categoryId} onChange={(event) => setCategoryId(event.target.value)}>{categories.map((category) => <option value={category.id} key={category.id}>{category.name}</option>)}</select></label></div>
-    {article.status === 'published' && <label className="form-field revision-note-field"><span>Why is this note changing? <small>{publishedContentChanged ? 'REQUIRED' : 'REQUIRED WHEN CONTENT CHANGES'} · 20–500 CHARACTERS</small></span><textarea required={publishedContentChanged} minLength={publishedContentChanged ? 20 : undefined} maxLength={500} value={changeNote} onChange={(event) => setChangeNote(event.target.value)} rows={3} placeholder="Summarize what changed and why, such as new evidence, a correction, or updated uncertainty." /><small>Readers can see this note alongside the prior published version.</small></label>}
-    {error && <div className="inline-error">{error}</div>}{saved && <div className="success-message"><Check size={15} />Article changes saved.</div>}
-    <div className="article-edit-actions"><span>{article.status === 'draft' ? 'Publication requires complete sections and verified references.' : 'Classification changes remain visible to readers.'}</span><div><button className="button-secondary" type="submit" disabled={busy}>{busy ? 'Saving…' : article.status === 'draft' ? 'Save draft' : 'Save changes'}<Check size={14} /></button>{article.status === 'draft' && <button className="button-primary" type="button" disabled={busy} onClick={() => void publishArticle()}>{busy ? 'Preparing…' : 'Publish note'}<ArrowUpRight size={14} /></button>}</div></div>
-  </form>
-}
-
-function AdminPage() {
-  const { profile, loading: authLoading } = useAuth()
-  const canEdit = profile && ['editor', 'administrator'].includes(profile.role)
-  const isAdministrator = profile?.role === 'administrator'
-  const [tab, setTab] = useState<AdminTab>('review')
-  const [loading, setLoading] = useState(true)
-  const [error, setError] = useState('')
-  const [message, setMessage] = useState('')
-  const [workingId, setWorkingId] = useState('')
-  const [submissions, setSubmissions] = useState<ReviewSubmission[]>([])
-  const [references, setReferences] = useState<ReferenceReview[]>([])
-  const [articles, setArticles] = useState<EditorialArticle[]>([])
-  const [comments, setComments] = useState<EditorialComment[]>([])
-  const [commentReports, setCommentReports] = useState<CommentReport[]>([])
-  const [people, setPeople] = useState<AdminProfile[]>([])
-  const [categories, setCategories] = useState<AdminCategory[]>([])
-  const [stats, setStats] = useState<{ label: string; count: number }[]>([])
-  const [categoryName, setCategoryName] = useState('')
-  const [categoryDescription, setCategoryDescription] = useState('')
-  const [reviewNotes, setReviewNotes] = useState<Record<string, string>>({})
-  const [rejectionNotes, setRejectionNotes] = useState<Record<string, string>>({})
-  const [reportResolutionNotes, setReportResolutionNotes] = useState<Record<string, string>>({})
-  const tabs: { id: AdminTab; label: string; icon: typeof FileText; adminOnly?: boolean }[] = [
-    { id: 'review', label: 'Review queue', icon: FileText },
-    { id: 'references', label: 'References', icon: ExternalLink },
-    { id: 'articles', label: 'Articles', icon: Feather },
-    { id: 'comments', label: 'Comments', icon: MessageSquare },
-    { id: 'reports', label: 'Reports', icon: Flag },
-    { id: 'people', label: 'People & roles', icon: Users, adminOnly: true },
-    { id: 'categories', label: 'Categories', icon: Tags },
-    { id: 'statistics', label: 'Statistics', icon: BarChart3 },
-  ]
-  const visibleTabs = tabs.filter((item) => !item.adminOnly || isAdministrator)
-
-  async function loadCurrentTab() {
-    if (!supabase || !canEdit) {
-      setLoading(false)
-      return
-    }
-    setLoading(true)
-    setError('')
-    if (tab === 'review') {
-      const { data, error: queryError } = await supabase.from('submissions')
-        .select('id,title,summary,classification,category_id,status,created_at,reference_urls,evidence,hero_image_url,author:profiles!submissions_author_id_fkey(display_name),category:categories(name)')
-        .eq('status', 'pending').order('created_at', { ascending: true })
-      if (queryError) setError(queryError.message)
-      else setSubmissions((data ?? []) as unknown as ReviewSubmission[])
-    } else if (tab === 'references') {
-      const [submissionResult, sourceResult] = await Promise.all([
-        supabase.from('submission_references')
-          .select('id,url,verification_status,submission:submissions!submission_references_submission_id_fkey(title,status)')
-          .order('created_at', { ascending: false }).limit(100),
-        supabase.from('sources')
-          .select('id,url,verification_status,article:articles!sources_article_id_fkey(title,slug)')
-          .order('created_at', { ascending: false }).limit(100),
-      ])
-      if (submissionResult.error) setError(submissionResult.error.message)
-      if (sourceResult.error) setError((current) => current ? `${current}; ${sourceResult.error.message}` : sourceResult.error.message)
-      if (!submissionResult.error && !sourceResult.error) {
-        const submissionReferences = (submissionResult.data ?? []).map((reference) => ({
-          ...reference,
-          kind: 'submission' as const,
-          article: null,
-        }))
-        const articleSources = (sourceResult.data ?? []).map((source) => ({
-          ...source,
-          kind: 'article' as const,
-          submission: null,
-        }))
-        setReferences([...submissionReferences, ...articleSources] as unknown as ReferenceReview[])
-      }
-    } else if (tab === 'articles') {
-      const [articleResult, categoryResult] = await Promise.all([
-        supabase.from('articles')
-        .select('id,title,slug,summary,body,introduction,background,current_understanding,future_possibilities,limitations,classification,status,category_id,published_at,reading_minutes,hero_image_url,author:profiles!articles_author_id_fkey(display_name),category:categories(name,slug)')
-        .order('updated_at', { ascending: false }).limit(100),
-        supabase.from('categories').select('id,name,slug,description,is_active').order('name'),
-      ])
-      if (articleResult.error) setError(articleResult.error.message)
-      else setArticles((articleResult.data ?? []) as unknown as EditorialArticle[])
-      if (categoryResult.error) setError(categoryResult.error.message)
-      else setCategories((categoryResult.data ?? []) as AdminCategory[])
-    } else if (tab === 'comments') {
-      const { data, error: queryError } = await supabase.from('comments')
-        .select('id,body,created_at,status,author:profiles!comments_author_id_fkey(display_name),article:articles(title,slug)')
-        .order('created_at', { ascending: false }).limit(100)
-      if (queryError) setError(queryError.message)
-      else setComments((data ?? []) as unknown as EditorialComment[])
-    } else if (tab === 'reports') {
-      const { data, error: queryError } = await supabase.from('comment_reports')
-        .select('id,comment_id,reason,details,created_at,reporter:profiles!comment_reports_reporter_id_fkey(display_name),comment:comments!comment_reports_comment_id_fkey(body,status,author:profiles!comments_author_id_fkey(display_name),article:articles(title,slug))')
-        .eq('status', 'open')
-        .order('created_at', { ascending: true })
-        .limit(100)
-      if (queryError) setError(queryError.message)
-      else setCommentReports((data ?? []) as unknown as CommentReport[])
-    } else if (tab === 'people' && isAdministrator) {
-      const { data, error: queryError } = await supabase.from('profiles').select('id,display_name,avatar_url,role,created_at').order('created_at', { ascending: false }).limit(200)
-      if (queryError) setError(queryError.message)
-      else setPeople((data ?? []) as AdminProfile[])
-    } else if (tab === 'categories') {
-      const { data, error: queryError } = await supabase.from('categories').select('id,name,slug,description,is_active').order('name')
-      if (queryError) setError(queryError.message)
-      else setCategories((data ?? []) as AdminCategory[])
-    } else if (tab === 'statistics') {
-      const results = await Promise.all([
-        supabase.from('articles').select('id', { count: 'exact', head: true }).eq('status', 'published'),
-        supabase.from('submissions').select('id', { count: 'exact', head: true }).eq('status', 'pending'),
-        supabase.from('profiles').select('id', { count: 'exact', head: true }),
-        supabase.from('comments').select('id', { count: 'exact', head: true }).eq('status', 'visible'),
-        supabase.from('submission_references').select('id', { count: 'exact', head: true }).eq('verification_status', 'pending'),
-      ])
-      const failed = results.find((result) => result.error)
-      if (failed?.error) setError(failed.error.message)
-      else setStats([
-        { label: 'Published notes', count: results[0].count ?? 0 },
-        { label: 'Awaiting review', count: results[1].count ?? 0 },
-        { label: 'Registered members', count: results[2].count ?? 0 },
-        { label: 'Visible comments', count: results[3].count ?? 0 },
-        { label: 'References to verify', count: results[4].count ?? 0 },
-      ])
-    }
-    setLoading(false)
-  }
-
-  useEffect(() => { void loadCurrentTab() }, [tab, canEdit, isAdministrator])
-
-  async function reviewSubmission(id: string, action: 'approve' | 'return' | 'reject') {
-    if (!supabase) return
-    setWorkingId(id)
-    setError('')
-    setMessage('')
-    const { error: reviewError } = action === 'approve'
-      ? await supabase.rpc('approve_submission', { submission_id: id })
-      : action === 'return'
-        ? await supabase.rpc('reject_submission', { submission_id: id, review_notes: reviewNotes[id]?.trim() ?? '' })
-        : await supabase.rpc('reject_submission_final', { submission_id: id, rejection_notes: rejectionNotes[id]?.trim() ?? '' })
-    if (reviewError) setError(reviewError.message)
-    else {
-      setMessage(action === 'approve'
-        ? 'The submission is approved. A private editorial draft is ready to edit.'
-        : action === 'return' ? 'Revision feedback was sent to the author.' : 'The submission was rejected and the author was notified.')
-      if (action === 'return') setReviewNotes((current) => { const remaining = { ...current }; delete remaining[id]; return remaining })
-      if (action === 'reject') setRejectionNotes((current) => { const remaining = { ...current }; delete remaining[id]; return remaining })
-      await loadCurrentTab()
-    }
-    setWorkingId('')
-  }
-
-  async function updateReference(reference: ReferenceReview, status: ReferenceReview['verification_status']) {
-    if (!supabase || !profile) return
-    setWorkingId(reference.id)
-    setError('')
-    const table = reference.kind === 'submission' ? 'submission_references' : 'sources'
-    const { error: updateError } = await supabase.from(table).update({
-      verification_status: status,
-      verified_by: status === 'verified' ? profile.id : null,
-      verified_at: status === 'verified' ? new Date().toISOString() : null,
-    }).eq('id', reference.id)
-    if (updateError) setError(updateError.message)
-    else {
-      setReferences((current) => current.map((item) => item.id === reference.id ? { ...item, verification_status: status } : item))
-      setMessage(`Reference marked ${status.replace('_', ' ')}.`)
-    }
-    setWorkingId('')
-  }
-
-  async function moderateComment(comment: EditorialComment, status: EditorialComment['status']) {
-    if (!supabase) return
-    setWorkingId(comment.id)
-    setError('')
-    const { error: updateError } = await supabase.rpc('moderate_comment', {
-      p_comment_id: comment.id,
-      p_status: status,
-    })
-    if (updateError) setError(updateError.message)
-    else {
-      setComments((current) => current.map((item) => item.id === comment.id ? { ...item, status } : item))
-      setMessage(`Comment marked ${status}.`)
-    }
-    setWorkingId('')
-  }
-
-  async function resolveCommentReport(report: CommentReport, decision: 'dismiss' | 'hide' | 'remove') {
-    if (!supabase) return
-    setWorkingId(report.id)
-    setError('')
-    const { error: resolveError } = await supabase.rpc('resolve_comment_report', {
-      p_report_id: report.id,
-      p_decision: decision,
-      p_resolution_note: reportResolutionNotes[report.id]?.trim() ?? '',
-    })
-    if (resolveError) setError(resolveError.message)
-    else {
-      setCommentReports((current) => current.filter((item) => item.id !== report.id))
-      setReportResolutionNotes((current) => {
-        const remaining = { ...current }
-        delete remaining[report.id]
-        return remaining
-      })
-      setMessage(decision === 'dismiss' ? 'Report dismissed with an editorial note.' : `Report resolved; comment ${decision === 'hide' ? 'hidden' : 'removed'}.`)
-    }
-    setWorkingId('')
-  }
-
-  async function updateRole(person: AdminProfile, role: Role) {
-    if (!supabase) return
-    setWorkingId(person.id)
-    setError('')
-    const { error: updateError } = await supabase.rpc('set_profile_role', { target_profile_id: person.id, new_role: role })
-    if (updateError) setError(updateError.message)
-    else {
-      setPeople((current) => current.map((item) => item.id === person.id ? { ...item, role } : item))
-      setMessage(`${person.display_name}'s role is now ${role}.`)
-    }
-    setWorkingId('')
-  }
-
-  async function createCategory(event: FormEvent<HTMLFormElement>) {
-    event.preventDefault()
-    if (!supabase) return
-    setWorkingId('new-category')
-    setError('')
-    const slug = categoryName.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
-    const { data, error: insertError } = await supabase.from('categories').insert({
-      name: categoryName.trim(),
-      slug,
-      description: categoryDescription.trim() || null,
-    }).select('id,name,slug,description,is_active').single()
-    if (insertError) setError(insertError.message)
-    else {
-      setCategories((current) => [...current, data as AdminCategory].sort((a, b) => a.name.localeCompare(b.name)))
-      setCategoryName('')
-      setCategoryDescription('')
-      setMessage('Category created.')
-    }
-    setWorkingId('')
-  }
-
-  async function toggleCategory(category: AdminCategory) {
-    if (!supabase) return
-    setWorkingId(category.id)
-    setError('')
-    const { error: updateError } = await supabase.from('categories').update({ is_active: !category.is_active }).eq('id', category.id)
-    if (updateError) setError(updateError.message)
-    else setCategories((current) => current.map((item) => item.id === category.id ? { ...item, is_active: !item.is_active } : item))
-    setWorkingId('')
-  }
-
-  if (authLoading) return <div className="loading-row"><span className="spinner" />Checking editorial access…</div>
-  if (!canEdit) return <div><PageIntro eyebrow="EDITORIAL DESK" title="This room is for editors." description="Review submissions and publish notes only with an authorized editorial role." /><div className="login-prompt"><ShieldCheck size={20} /><div><strong>Editorial access required.</strong><p>Roles are assigned by an administrator and cannot be changed from your account.</p></div><Link to="/" className="button-text">Return home <ArrowRight size={14} /></Link></div><AppFooter /></div>
-
-  return <div>
-    <PageIntro eyebrow="EDITORIAL DESK" title="Carefully, before we publish." description="A human-reviewed workspace for submissions, references, articles, and community care." />
-    {!backendConfigured && <ConnectionNotice />}
-    <nav className="admin-tabs" aria-label="Editorial dashboard">
-      {visibleTabs.map(({ id, label, icon: Icon }) => <button key={id} className={`admin-tab${tab === id ? ' admin-tab-active' : ''}`} onClick={() => { setTab(id); setMessage(''); setError('') }}><Icon size={15} />{label}</button>)}
-    </nav>
-    {message && <div className="success-message"><Check size={16} />{message}</div>}
-    {error && <div className="inline-error">{error}</div>}
-    {loading ? <div className="loading-row"><span className="spinner" />Loading the editorial desk…</div> : <>
-      {tab === 'review' && (submissions.length ? <div className="review-list">{submissions.map((submission) => <article className="review-card" key={submission.id}><div className="article-card-meta"><ClassificationTag value={submission.classification} /><span>{submission.category?.name ?? 'Uncategorized'}</span><span>Submitted {new Date(submission.created_at).toLocaleDateString()}</span></div><h2>{submission.title}</h2><p>{submission.summary}</p><SubmissionReviewImage value={submission.hero_image_url} title={submission.title} />{submission.evidence && <div className="review-evidence"><strong>Evidence & context</strong><p>{submission.evidence}</p></div>}{submission.reference_urls.length > 0 && <div className="review-references"><strong>References — verify in the References tab before approval</strong>{submission.reference_urls.map((url) => <a key={url} href={url} target="_blank" rel="noreferrer">{url}<ExternalLink size={13} /></a>)}</div>}<label className="form-field review-feedback"><span>Actionable feedback for the author <small>REQUIRED TO REQUEST CHANGES</small></span><textarea required minLength={20} maxLength={2000} rows={3} value={reviewNotes[submission.id] ?? ''} onChange={(event) => setReviewNotes((current) => ({ ...current, [submission.id]: event.target.value }))} placeholder="Explain what needs revision and why. Include source or uncertainty guidance where relevant." /></label><label className="form-field review-feedback"><span>Rejection explanation <small>REQUIRED · 20–2000 CHARACTERS</small></span><textarea required minLength={20} maxLength={2000} rows={3} value={rejectionNotes[submission.id] ?? ''} onChange={(event) => setRejectionNotes((current) => ({ ...current, [submission.id]: event.target.value }))} placeholder="Explain why this submission is being declined." /></label><div className="review-actions"><span>By {submission.author?.display_name ?? 'Community member'}</span><div><button className="button-secondary" disabled={workingId === submission.id || (reviewNotes[submission.id]?.trim().length ?? 0) < 20} onClick={() => void reviewSubmission(submission.id, 'return')}>Request changes</button><button className="button-secondary review-reject-button" disabled={workingId === submission.id || (rejectionNotes[submission.id]?.trim().length ?? 0) < 20} onClick={() => void reviewSubmission(submission.id, 'reject')}>Reject Submission</button><button className="button-primary" disabled={workingId === submission.id} onClick={() => void reviewSubmission(submission.id, 'approve')}>{workingId === submission.id ? 'Reviewing…' : 'Approve & create draft'}<ArrowRight size={14} /></button></div></div></article>)}</div> : <EmptyState title="The review queue is clear." description="New member ideas will appear here when they're ready for editorial review." />)}
-      {tab === 'references' && (references.length ? <div className="reference-review-list">{references.map((reference) => <article className="reference-review-card" key={`${reference.kind}-${reference.id}`}><div><div className="eyebrow">{reference.submission ? `SUBMISSION · ${reference.submission.title}` : `PUBLISHED NOTE · ${reference.article?.title ?? 'Untitled article'}`}</div><a href={reference.url} target="_blank" rel="noreferrer">{reference.url}<ExternalLink size={13} /></a></div><span className={`reference-status reference-${reference.verification_status}`}>{reference.verification_status.replace('_', ' ')}</span><div className="reference-actions"><button className="button-secondary" disabled={workingId === reference.id} onClick={() => void updateReference(reference, 'needs_attention')}>Needs attention</button><button className="button-primary" disabled={workingId === reference.id} onClick={() => void updateReference(reference, 'verified')}><Check size={14} />Verify source</button></div></article>)}</div> : <EmptyState title="No references need review." description="References attached to pending submissions will appear here. All references must be verified before an idea can be published." />)}
-      {tab === 'articles' && (articles.length ? <div className="article-management-list">{articles.map((article) => <ArticleEditor article={article} categories={categories.length ? categories : []} key={article.id} onSaved={() => { setMessage(article.status === 'draft' ? 'The note is published.' : 'Article changes saved.'); void loadCurrentTab() }} />)}</div> : <EmptyState title="No articles to edit yet." description="Approved submissions appear here as editorial drafts. Published notes remain available for updates." />)}
-      {tab === 'comments' && (comments.length ? <div className="moderation-list">{comments.map((comment) => <article className="moderation-card" key={comment.id}><div className="article-card-meta"><span className={`reference-status reference-${comment.status}`}>{comment.status}</span><span>{comment.author?.display_name ?? 'Community member'}</span><span>{new Date(comment.created_at).toLocaleDateString()}</span></div><p>{comment.body}</p><Link to={`/article/${comment.article?.slug ?? ''}`} className="moderation-article">{comment.article?.title ?? 'Article unavailable'} <ArrowUpRight size={13} /></Link><div className="moderation-actions"><button className="button-secondary" disabled={workingId === comment.id} onClick={() => void moderateComment(comment, comment.status === 'visible' ? 'hidden' : 'visible')}>{comment.status === 'visible' ? 'Hide comment' : 'Restore comment'}</button><button className="button-secondary" disabled={workingId === comment.id || comment.status === 'removed'} onClick={() => void moderateComment(comment, 'removed')}>Remove comment</button></div></article>)}</div> : <EmptyState title="No comments to moderate." description="Community comments will appear here as readers join the conversation." />)}
-      {tab === 'reports' && (commentReports.length ? <div className="moderation-list">{commentReports.map((report) => <article className="moderation-card report-card" key={report.id}><div className="article-card-meta"><span className="reference-status reference-pending">OPEN REPORT</span><span>{report.reason.replace(/_/g, ' ')}</span><span>Reported {new Date(report.created_at).toLocaleDateString()}</span></div><div className="report-context"><div><strong>Comment by {report.comment?.author?.display_name ?? 'Community member'}</strong><p>{report.comment?.body ?? 'The reported comment is unavailable.'}</p></div><div><span>Reported by {report.reporter?.display_name ?? 'Community member'}</span>{report.details && <p>{report.details}</p>}</div></div><Link to={`/article/${report.comment?.article?.slug ?? ''}`} className="moderation-article">{report.comment?.article?.title ?? 'Article unavailable'} <ArrowUpRight size={13} /></Link><label className="form-field report-resolution"><span>Editorial resolution note <small>REQUIRED · 10–1000 CHARACTERS</small></span><textarea required minLength={10} maxLength={1000} rows={2} value={reportResolutionNotes[report.id] ?? ''} onChange={(event) => setReportResolutionNotes((current) => ({ ...current, [report.id]: event.target.value }))} placeholder="Record the reason for dismissing this report or taking action." /></label><div className="moderation-actions"><button className="button-secondary" disabled={workingId === report.id || (reportResolutionNotes[report.id]?.trim().length ?? 0) < 10} onClick={() => void resolveCommentReport(report, 'dismiss')}>Dismiss</button><button className="button-secondary" disabled={workingId === report.id || (reportResolutionNotes[report.id]?.trim().length ?? 0) < 10} onClick={() => void resolveCommentReport(report, 'hide')}>Hide comment</button><button className="button-primary" disabled={workingId === report.id || (reportResolutionNotes[report.id]?.trim().length ?? 0) < 10} onClick={() => void resolveCommentReport(report, 'remove')}>{workingId === report.id ? 'Resolving…' : 'Remove comment'}</button></div></article>)}</div> : <EmptyState title="No open reports." description="Reader reports about visible comments appear here for private editorial review." />)}
-      {tab === 'people' && isAdministrator && <div className="people-list">{people.map((person) => <div className="people-row" key={person.id}><UserAvatar url={person.avatar_url} name={person.display_name} /><div className="people-info"><strong>{person.display_name}</strong><span>Joined {new Date(person.created_at).toLocaleDateString()}</span></div><select aria-label={`Role for ${person.display_name}`} value={person.role} disabled={person.id === profile?.id || workingId === person.id} onChange={(event) => void updateRole(person, event.target.value as Role)}>{(['member', 'contributor', 'editor', 'administrator'] as Role[]).map((role) => <option key={role} value={role}>{role}</option>)}</select>{person.id === profile?.id && <span className="self-role-note">Your role</span>}</div>)}{people.length === 0 && <EmptyState title="No member profiles found." description="New members will appear here after their first registration." />}</div>}
-      {tab === 'categories' && <div className="category-management"><form className="category-create-form" onSubmit={(event) => void createCategory(event)}><div className="eyebrow"><span className="eyebrow-line" />ADD A FIELD</div><label className="form-field"><span>Category name</span><input required minLength={2} maxLength={60} value={categoryName} onChange={(event) => setCategoryName(event.target.value)} placeholder="e.g. Agriculture" /></label><label className="form-field"><span>Description</span><input value={categoryDescription} onChange={(event) => setCategoryDescription(event.target.value)} maxLength={300} placeholder="What belongs in this field?" /></label><button className="button-primary" disabled={workingId === 'new-category'}><Plus size={14} />Create category</button></form><div className="category-manage-list">{categories.map((category) => <div className="category-manage-row" key={category.id}><div><strong>{category.name}</strong><span>/{category.slug}</span>{category.description && <p>{category.description}</p>}</div><span className={`reference-status ${category.is_active ? 'reference-verified' : 'reference-hidden'}`}>{category.is_active ? 'active' : 'archived'}</span><button className="button-secondary" disabled={workingId === category.id} onClick={() => void toggleCategory(category)}>{category.is_active ? 'Archive' : 'Reactivate'}</button></div>)}</div></div>}
-      {tab === 'statistics' && <div className="stats-grid">{stats.map(({ label, count }) => <div className="stat-card" key={label}><div className="eyebrow">{label}</div><strong>{count.toLocaleString()}</strong><span>Live database count</span></div>)}</div>}
-    </>}
-    <AppFooter />
-  </div>
 }
 
 function SubmissionRevisionForm({ submission, categories, onResubmitted }: {
@@ -2135,7 +1622,7 @@ function AboutPage() {
   </div>
 }
 
-function AppFooter() {
+export function AppFooter() {
   return <footer className="site-footer"><Link to="/" className="footer-brand"><Mark small /> AFTERLIGHT</Link><span>Explore. Imagine. Create Tomorrow.</span><div><Link to="/about">About</Link><Link to="/discover">Editorial labels</Link><Link to="/submit">Contribute</Link></div><span className="footer-copyright">© {new Date().getFullYear()} AFTERLIGHT</span></footer>
 }
 
@@ -2144,7 +1631,7 @@ function NotFound() {
 }
 
 export default function App() {
-  return <AuthProvider><AppShell><Routes>
+  return <AuthProvider><AppShell><Suspense fallback={<div className="loading-row" role="status"><span className="spinner" />Loading pageâ€¦</div>}><Routes>
     <Route path="/" element={<HomePage />} />
     <Route path="/explore" element={<ExplorePage />} />
     <Route path="/discover" element={<DiscoverPage />} />
@@ -2158,5 +1645,5 @@ export default function App() {
     <Route path="/profile" element={<ProfilePage />} />
     <Route path="/login" element={<LoginPage />} />
     <Route path="*" element={<NotFound />} />
-  </Routes></AppShell></AuthProvider>
+  </Routes></Suspense></AppShell></AuthProvider>
 }
